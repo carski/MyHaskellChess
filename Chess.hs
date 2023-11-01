@@ -7,7 +7,7 @@ module Chess where
 
 import Debug.Trace (trace)
 
-import Control.Monad      (unless)
+import Control.Monad      (when)
 import Control.Monad.ST   (ST, runST)
 import Data.Array.ST      (STArray, newListArray, readArray, writeArray, runSTArray)
 import Data.Char          (toLower)
@@ -31,7 +31,7 @@ data Piece = P Colour      -- Pawn
            | N Colour      -- Knight
            | R Colour      -- Rook
            | Q Colour      -- Queen
-           | K Colour Bool -- King
+           | K Colour      -- King
   deriving (Eq, Show)
 
 col :: Piece -> Colour
@@ -40,11 +40,7 @@ col (B c) = c
 col (N c) = c
 col (R c) = c
 col (Q c) = c
-col (K c _) = c
-
-canCastle :: Piece -> Bool
-canCastle (K _ b) = b
-canCastle _       = False
+col (K c) = c
 
 type Square = (Int,Int)
 
@@ -60,13 +56,13 @@ showSquareState (Just (B White)) = "B"
 showSquareState (Just (N White)) = "N"
 showSquareState (Just (R White)) = "R"
 showSquareState (Just (Q White)) = "Q"
-showSquareState (Just (K White _)) = "K"
+showSquareState (Just (K White)) = "K"
 showSquareState (Just (P Black)) = "p"
 showSquareState (Just (B Black)) = "b"
 showSquareState (Just (N Black)) = "n"
 showSquareState (Just (R Black)) = "r"
 showSquareState (Just (Q Black)) = "q"
-showSquareState (Just (K Black _)) = "k"
+showSquareState (Just (K Black)) = "k"
 
 data Move = Move { from :: Square, to :: Square }
   deriving (Eq, Show)
@@ -86,13 +82,10 @@ writeSquare board (x,y) = writeArray board (8*(8 - y) + (x-1))
 correctColour :: Piece -> Colour -> ST s Bool
 correctColour piece colour = return $ col piece == colour
 
-canCastle :: Piece -> Colour -> Bool
-canCastle king col = 
-
-validPieceMovement :: Piece -> Move -> [(Piece, Move)]
+validPieceMovement :: Piece -> Move -> Bool
 validPieceMovement piece move@(Move (x1,y1) (x2,y2)) =
   -- Checks for moves that only move themselves
-  if case piece of
+  case piece of
     P col -> (x1 == x2 &&             {- regular pawn movement -}
                 case col of
                   Black -> y2 == y1 - 1 || (y1 == 7 && y2 == 5)
@@ -108,18 +101,10 @@ validPieceMovement piece move@(Move (x1,y1) (x2,y2)) =
                       abs (x2 - x1) == 2 && abs (y2 - y1) == 1
     R _   -> isStraight move
     Q _   -> isDiagonal move || isStraight move
-  then [(piece, move)]
-  -- Special cases for moves that can move other pieces or introduce new pieces
-  else
-    case piece of
-      K col False -> abs (x2 - x1) <= 1 && abs (y2 - y1) <= 1
-      K col hasCastle -> if hasCastle && canCastle piece col
-                         then [(piece, move), (R col, Move ())]
-                         else []
-      _ -> []
+    K _   -> abs (x2 - x1) <= 1 && abs (y2 - y1) <= 1
 
 
-validPieceMovement' :: Piece -> Move -> ST s [(Piece, Move)]
+validPieceMovement' :: Piece -> Move -> ST s Bool
 validPieceMovement' = fmap return . validPieceMovement
 
 takingOwnPiece :: Board s -> Piece -> Move -> ST s Bool
@@ -145,7 +130,7 @@ hasPiecesBetween board piece move =
 
 obstructed :: Board s -> Piece -> Move -> ST s Bool
 obstructed _ (N _) _ = return False
-obstructed _ (K _ _) _ = return False
+obstructed _ (K _) _ = return False
 obstructed board p@(P _) m = if isStraight m
   then hasPiecesBetween board p m             -- forward move is blocked by any pieces
   else isNothing <$> readSquare board (to m)  -- diagonal move must be capture
@@ -160,7 +145,7 @@ getKingSquare board colour = do
            Just (indexToSquare index)
   where
     isKing :: Colour -> SquareState -> Bool
-    isKing c (Just (K col _)) = c == col
+    isKing c (Just (K col)) = c == col
     isKing _ _ = False
 
 getColourPieces :: Board s -> Colour -> ST s [(Square,Piece)]
@@ -203,16 +188,13 @@ inCheckAfterMove board piece (Move (x1,y1) (x2,y2)) = do
   writeSquare board (x1,y1) (Just piece)
   return res
 
-legalMove :: Board s -> Piece -> Move -> Colour -> ST s [(Piece, Move)]
+legalMove :: Board s -> Piece -> Move -> Colour -> ST s Bool
 -- NOTE: order of evaluation for each function is not guaranteed
-legalMove board piece move colour = do
-  checks <- correctColour piece colour >>= \r1 -> (r1 &&)
+legalMove board piece move colour =
+  correctColour piece colour >>= \r1 -> (r1 &&)
     . not <$> takingOwnPiece board piece move >>= \r2 -> (r2 &&)
     . not <$> obstructed board piece move >>= \r3 -> (r3 &&)
     . not <$> inCheckAfterMove board piece move
-  if checks then
-    validPieceMovement' piece move
-  else return []
 
 {- First do basic piece check, then make move after passing legality check -}
 makeMove :: ST s (Board s) -> Move -> Colour -> ST s (Board s)
@@ -222,14 +204,10 @@ makeMove board move@(Move s1 s2) colour = do
   case from of
     Nothing    -> return st
     Just piece -> do
-      -- Get all pieces which need to be updated to make the move, illegal moves return []
-      pieceMoves <- legalMove st piece move colour
-      unless (null pieceMoves) $
-        mapM_ (\(p, Move s1 s2) -> do
-                 writeSquare st s2 (Just p)
-                 writeSquare st s1 Nothing
-              )
-              pieceMoves
+      legal <- legalMove st piece move colour
+      when legal $ do
+        writeSquare st s2 (Just piece)
+        writeSquare st s1 Nothing
       return st
 
 
@@ -241,7 +219,7 @@ hasLegalMoves :: Board s -> Colour -> ST s Bool
 hasLegalMoves board colour = do
   colourPieces <- getColourPieces board colour
   let validMoves = filter (uncurry validPieceMovement) (movesToCheck colourPieces)
-  any (not . null) <$> mapM (\(piece, move) -> legalMove board piece move colour) validMoves
+  or <$> mapM (\(piece, move) -> legalMove board piece move colour) validMoves
     where
       squares = [(x,y) | x <- [1..8], y <- [1..8]]
       movesToCheck pieceSquares = [(piece, Move from to) | (from,piece) <- pieceSquares, to <- squares]
@@ -287,12 +265,12 @@ showBoard board = intercalate line $
 startPos :: ST s (Board s)
 startPos = newListArray (0, 63)
   [
-  Just (R Black), Just (N Black), Just (B Black), Just (Q Black), Just (K Black True), Just (B Black), Just (N Black), Just (R Black),
+  Just (R Black), Just (N Black), Just (B Black), Just (Q Black), Just (K Black), Just (B Black), Just (N Black), Just (R Black),
   Just (P Black), Just (P Black), Just (P Black), Just (P Black), Just (P Black), Just (P Black), Just (P Black), Just (P Black),
   Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       ,
   Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       ,
   Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       ,
   Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       , Nothing       ,
   Just (P White), Just (P White), Just (P White), Just (P White), Just (P White), Just (P White), Just (P White), Just (P White),
-  Just (R White), Just (N White), Just (B White), Just (Q White), Just (K White True), Just (B White), Just (N White), Just (R White)
+  Just (R White), Just (N White), Just (B White), Just (Q White), Just (K White), Just (B White), Just (N White), Just (R White)
   ]

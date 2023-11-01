@@ -1,7 +1,8 @@
+-- TextBased interface module
 {-# LANGUAGE RankNTypes #-}
 
 
-module TextBased where
+module Main where
 
 import Chess            (Board, Colour(..), Move, Result(..), opposite, makeMove, checkGameResult,
                          boardStateUnchanged, startPos, showBoard)
